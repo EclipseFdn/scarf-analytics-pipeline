@@ -1,0 +1,30 @@
+# Default values
+
+name: &name open-vsx-scarf-analytics
+environment: &environment staging
+platform: &platform okd-c1
+
+image:
+  repository: ghcr.io/eclipsefdn/scarf-analytics
+  tag: latest
+  pullPolicy: IfNotPresent
+
+sync:
+  # How often the CronJob fires, and the Loki window sync.py pulls on its very first
+  # run (before a checkpoint exists). Must evenly divide 60 (1, 2, 3, 4, 5, 6, 10, 12,
+  # 15, 20, 30, 60) so the "*/N" cron schedule below produces evenly spaced ticks.
+  intervalMinutes: 5
+  # ConfigMap sync.py reads/writes to remember the last successfully-synced timestamp,
+  # so a run that takes longer than intervalMinutes resumes where the last one left off
+  # instead of losing the gap.
+  checkpointConfigMapName: scarf-sync-checkpoint
+  # Safety cap: if the checkpoint is older than this (outage, stuck job, etc.), clamp
+  # the catch-up query to this many minutes instead of one unbounded Loki query.
+  maxLookbackMinutes: 60
+
+  loki:
+    url: "https://logs-prod-018.grafana.net/"
+    query: '{service_name="fastly_cdn", env="production"} |= "download"'
+
+  scarf:
+    batchSize: 500

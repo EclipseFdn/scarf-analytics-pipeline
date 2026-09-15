@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scarf-loki-sync
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: scarf-sync-pipeline
+spec:
+  schedule: "*/{{ .Values.sync.intervalMinutes }} * * * *"
+  concurrencyPolicy: Forbid  # Prevents overlapping runs if a batch run faces delay
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: scarf-sync-pipeline
+        spec:
+          serviceAccountName: scarf-sync
+          securityContext:
+            # Strictly runs under regular restricted SCC profile with zero root access
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: sync-worker
+            image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+            imagePullPolicy: {{ .Values.image.pullPolicy }}
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                - ALL
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"  # Bounded threshold to absorb peak 6.5k RPS safely
+                cpu: "500m"
+            env:
+            - name: LOKI_URL
+              value: "{{ .Values.sync.loki.url }}"
+            - name: LOKI_QUERY
+              value: {{ .Values.sync.loki.query | quote }}
+            - name: SCARF_BATCH_SIZE
+              value: "{{ .Values.sync.scarf.batchSize }}"
+            - name: SYNC_INTERVAL_MINUTES
+              value: "{{ .Values.sync.intervalMinutes }}"
+            - name: CHECKPOINT_CONFIGMAP_NAME
+              value: "{{ .Values.sync.checkpointConfigMapName }}"
+            - name: MAX_LOOKBACK_MINUTES
+              value: "{{ .Values.sync.maxLookbackMinutes }}"
+            envFrom:
+            - secretRef:
+                name: scarf-loki-credentials
+          restartPolicy: OnFailure
