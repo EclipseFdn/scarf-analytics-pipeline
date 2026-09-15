@@ -11,10 +11,10 @@ from requests.auth import HTTPBasicAuth
 logger = logging.getLogger(__name__)
 
 # --- Configuration Environment Variables --- #
-LOKI_URL = os.getenv("LOKI_URL", "https://logs-prod-018.grafana.net")
+LOKI_URL = os.getenv("LOKI_URL")
 LOKI_USER = os.getenv("LOKI_USER")
 LOKI_API_KEY = os.getenv("LOKI_API_KEY")
-LOKI_QUERY = os.getenv("LOKI_QUERY", '{service_name="fastly_cdn", env="production"}')
+LOKI_QUERY = os.getenv("LOKI_QUERY")
 
 SCARF_API_TOKEN = os.getenv("SCARF_API_TOKEN")
 SCARF_ENTITY_ID = os.getenv("SCARF_ENTITY_ID")
