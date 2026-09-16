@@ -35,17 +35,25 @@ spec:
             resources:
               requests:
                 memory: "256Mi"
-                cpu: "100m"
+                cpu: "200m"
               limits:
-                memory: "512Mi"  # Bounded threshold to absorb peak 6.5k RPS safely
-                cpu: "500m"
+                # The whole window's log lines, parsed events, and per-batch ndjson
+                # payloads are all held in memory at once (no streaming), so this is
+                # a conservative headroom bump, not a verified-safe number -- revisit
+                # once we've load-tested against an actual peak-RPS window.
+                memory: "1Gi"
+                cpu: "1000m"
             env:
             - name: LOKI_URL
               value: "{{ .Values.sync.loki.url }}"
             - name: LOKI_QUERY
               value: {{ .Values.sync.loki.query | quote }}
+            - name: ORGANIZATION_NAME
+              value: "{{ .Values.sync.scarf.organizationName }}"
             - name: SCARF_BATCH_SIZE
               value: "{{ .Values.sync.scarf.batchSize }}"
+            - name: SCARF_MAX_WORKERS
+              value: "{{ .Values.sync.scarf.maxWorkers }}"
             - name: SYNC_INTERVAL_MINUTES
               value: "{{ .Values.sync.intervalMinutes }}"
             - name: CHECKPOINT_CONFIGMAP_NAME

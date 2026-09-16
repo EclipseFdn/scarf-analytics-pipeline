@@ -21,10 +21,12 @@ sync:
   # Safety cap: if the checkpoint is older than this (outage, stuck job, etc.), clamp
   # the catch-up query to this many minutes instead of one unbounded Loki query.
   maxLookbackMinutes: 60
-
+  
   loki:
     url: "https://logs-prod-018.grafana.net/"
-    query: '{service_name="fastly_cdn", env="production"} |= "download"'
+    query: '{service_name="fastly_cdn", env="production"}'
 
   scarf:
+    organizationName: OpenVSX
     batchSize: 500
+    maxWorkers: 10

@@ -1,8 +1,8 @@
 # scarf-analytics-pipeline
 
-A scheduled pipeline that pulls Fastly CDN download logs from Grafana Loki and
+A scheduled pipeline that pulls Fastly CDN traffic logs from Grafana Loki and
 ships them as telemetry events to [Scarf](https://scarf.sh), giving OpenVSX
-visibility into package download analytics.
+visibility into package download and general request analytics.
 
 ## How it works
 
@@ -17,7 +17,8 @@ interval (default: every 5 minutes). Each run:
    long gap doesn't turn into one huge Loki query — the untracked span is
    permanently skipped.
 2. **Fetches logs from Loki** via `query_range` for that window.
-3. **Parses each log line** into a Scarf `download` event, deduplicated by a
+3. **Parses each log line** into a Scarf event, typed `download` or `request`
+   depending on whether the URL looks like a download, deduplicated by a
    SHA-256 hash of the raw log line (`$unique_id`), and filters out lines
    missing both an IP and a user agent.
 4. **Ships events to Scarf** in batches (`SCARF_BATCH_SIZE`, default 500) via
@@ -56,7 +57,7 @@ secret in the target namespace.
 | `SCARF_ENTITY_ID` | Scarf package/entity ID to import events into | — |
 | `ORGANIZATION_NAME` | Scarf organization name | `OpenVSX` |
 | `SCARF_BATCH_SIZE` | Max events per Scarf import request | `500` |
-| `SYNC_INTERVAL_MINUTES` | Window size for the first run (no checkpoint yet); must match the CronJob schedule | `15` |
+| `SYNC_INTERVAL_MINUTES` | Window size for the first run (no checkpoint yet); must match the CronJob schedule | `5` |
 | `MAX_LOOKBACK_MINUTES` | Caps how far a resumed run will query back if the checkpoint is stale | `60` |
 | `CHECKPOINT_CONFIGMAP_NAME` | Name of the ConfigMap used to persist the sync checkpoint | `scarf-sync-checkpoint` |
 
@@ -73,7 +74,7 @@ pip install -r scripts/requirements.txt
 export LOKI_URL=https://logs-prod-018.grafana.net/
 export LOKI_USER=...
 export LOKI_API_KEY=...
-export LOKI_QUERY='{service_name="fastly_cdn", env="production"} |= "download"'
+export LOKI_QUERY='{service_name="fastly_cdn", env="production"}'
 export SCARF_API_TOKEN=...
 export SCARF_ENTITY_ID=...
 
