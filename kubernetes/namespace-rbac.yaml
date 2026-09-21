@@ -10,16 +10,23 @@
 # manage Helm releases in the openvsx-scarf-analytics namespace. Helm 3 stores release
 # state as Secrets, so ci-bot needs at least get/list/watch/create/update/delete
 # on secrets, plus the usual workload resources it deploys (Deployments,
-# CronJobs, ConfigMaps, Services, ServiceAccounts, etc.). The built-in "edit"
-# ClusterRole covers all of this.
+# CronJobs, ConfigMaps, Services, ServiceAccounts, etc.). The chart's own
+# charts/templates/rbac.yaml also has Helm create a Role + RoleBinding for the
+# scarf-sync ServiceAccount, and the built-in "edit" ClusterRole deliberately
+# excludes managing roles/rolebindings (RBAC hardening default). The built-in
+# "admin" ClusterRole is the one that adds namespace-scoped role/rolebinding
+# management on top of everything "edit" grants, so we use that instead.
 #
 # NOTE: ci-bot cannot grant itself this permission — an EF infra admin (or
-# whoever has namespace-admin rights on openvsx-scarf-analytics) must apply this with:
+# whoever has namespace-admin rights on openvsx-scarf-analytics) must apply this.
+# roleRef is immutable on an existing RoleBinding, so the old ci-bot-edit
+# binding must be deleted before re-applying:
+#   kubectl delete rolebinding ci-bot-edit -n openvsx-scarf-analytics
 #   kubectl apply -f namespace-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: ci-bot-edit
+  name: ci-bot-admin
   namespace: openvsx-scarf-analytics
 subjects:
   - kind: ServiceAccount
@@ -28,4 +35,4 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: edit
+  name: admin
