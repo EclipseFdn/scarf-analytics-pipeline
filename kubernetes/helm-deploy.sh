@@ -19,7 +19,7 @@ ROOT_DIR="${SCRIPT_FOLDER}/.."
 CHART_DIR="${ROOT_DIR}/charts"
 
 release_name="staging"
-namespace="scarf-analytics"
+namespace="openvsx-scarf-analytics"
 
 environment="${1:-}"
 image_tag="${2:-}"
