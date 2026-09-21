@@ -7,20 +7,20 @@
 #*******************************************************************************
 
 # Grants the ci-bot ServiceAccount (foundation-internal-infra) permission to
-# manage Helm releases in the scarf-analytics namespace. Helm 3 stores release
+# manage Helm releases in the openvsx-scarf-analytics namespace. Helm 3 stores release
 # state as Secrets, so ci-bot needs at least get/list/watch/create/update/delete
 # on secrets, plus the usual workload resources it deploys (Deployments,
 # CronJobs, ConfigMaps, Services, ServiceAccounts, etc.). The built-in "edit"
 # ClusterRole covers all of this.
 #
 # NOTE: ci-bot cannot grant itself this permission — an EF infra admin (or
-# whoever has namespace-admin rights on scarf-analytics) must apply this with:
+# whoever has namespace-admin rights on openvsx-scarf-analytics) must apply this with:
 #   kubectl apply -f namespace-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: ci-bot-edit
-  namespace: scarf-analytics
+  namespace: openvsx-scarf-analytics
 subjects:
   - kind: ServiceAccount
     name: ci-bot
