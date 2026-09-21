@@ -65,7 +65,6 @@ printf "==> Running helm upgrade: release='%s' namespace='%s' image_tag='%s'\n" 
 helm upgrade --install "${release_name}" "${CHART_DIR}" \
   --set image.tag="${image_tag}" \
   --namespace "${namespace}" \
-  --create-namespace \
   "${helm_mode_flags[@]}"
 
 if [[ -n "${DRY_RUN}" ]]; then
