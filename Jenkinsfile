@@ -34,7 +34,7 @@ pipeline {
 
   environment {
     APP_NAME = 'scarf-analytics'
-    IMAGE_NAME = 'ghcr.io/eclipsefdn/scarf-analytics'
+    IMAGE_NAME = 'ghcr.io/eclipsefdn/scarf-analytics-pipeline'
     CONTAINER_NAME = 'scarf-analytics'
     IMAGE_TAG = sh(
       script: """
