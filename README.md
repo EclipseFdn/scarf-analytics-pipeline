@@ -49,7 +49,7 @@ secret in the target namespace.
 
 | Variable | Description | Default |
 |---|---|---|
-| `LOKI_URL` | Base URL of the Grafana Loki instance | — |
+| `LOKI_URL` | Base URL of the Grafana Loki instance (secret) | — |
 | `LOKI_USER` | Loki basic-auth username (secret) | — |
 | `LOKI_API_KEY` | Loki basic-auth API key (secret) | — |
 | `LOKI_QUERY` | LogQL query selecting the log stream to sync | — |
@@ -61,10 +61,10 @@ secret in the target namespace.
 | `MAX_LOOKBACK_MINUTES` | Caps how far a resumed run will query back if the checkpoint is stale | `60` |
 | `CHECKPOINT_CONFIGMAP_NAME` | Name of the ConfigMap used to persist the sync checkpoint | `scarf-sync-checkpoint` |
 
-`LOKI_USER`, `LOKI_API_KEY`, `SCARF_API_TOKEN`, and `SCARF_ENTITY_ID` are
-expected to come from the `scarf-loki-credentials` Kubernetes secret
-(referenced via `envFrom` in the CronJob template) rather than
-`values.yaml`.
+`LOKI_URL`, `LOKI_USER`, `LOKI_API_KEY`, `SCARF_API_TOKEN`, and
+`SCARF_ENTITY_ID` are expected to come from the `scarf-loki-credentials`
+Kubernetes secret (referenced via `envFrom` in the CronJob template) rather
+than `values.yaml`.
 
 ## Running locally
 

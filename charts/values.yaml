@@ -23,7 +23,8 @@ sync:
   maxLookbackMinutes: 60
   
   loki:
-    url: "https://logs-prod-018.grafana.net/"
+    # url comes from the scarf-loki-credentials Kubernetes secret (LOKI_URL key),
+    # not this file -- see README "Configuration".
     query: '{service_name="fastly_cdn", env="production"}'
 
   scarf:
