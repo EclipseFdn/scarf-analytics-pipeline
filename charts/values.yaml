@@ -33,5 +33,5 @@ sync:
 
   scarf:
     organizationName: OpenVSX
-    batchSize: 500
-    maxWorkers: 10
+    batchSize: 5000
+    maxWorkers: 5
