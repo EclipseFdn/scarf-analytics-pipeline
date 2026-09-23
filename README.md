@@ -11,11 +11,10 @@ interval (default: every 5 minutes). Each run:
 
 1. **Determines the query window.** The end of the last successful run is
    read from a checkpoint `ConfigMap` (`scarf-sync-checkpoint` by default).
-   If no checkpoint exists yet, it falls back to a fixed-size window
-   (`SYNC_INTERVAL_MINUTES`). If the checkpoint is older than
-   `MAX_LOOKBACK_MINUTES` (e.g. after an outage), the window is clamped so a
-   long gap doesn't turn into one huge Loki query — the untracked span is
-   permanently skipped.
+   Each run queries exactly `SYNC_INTERVAL_MINUTES` starting from the
+   checkpoint (capped at the current time). If the job falls behind (e.g. after
+   an outage), it catches up one window per run without skipping any logs. If
+   no checkpoint exists yet, it queries the last `SYNC_INTERVAL_MINUTES`.
 2. **Fetches logs from Loki** via `query_range` for that window.
 3. **Parses each log line** into a Scarf event, typed `download` or `request`
    depending on whether the URL looks like a download, deduplicated by a
@@ -57,8 +56,7 @@ secret in the target namespace.
 | `SCARF_ENTITY_ID` | Scarf package/entity ID to import events into | — |
 | `ORGANIZATION_NAME` | Scarf organization name | `OpenVSX` |
 | `SCARF_BATCH_SIZE` | Max events per Scarf import request | `500` |
-| `SYNC_INTERVAL_MINUTES` | Window size for the first run (no checkpoint yet); must match the CronJob schedule | `5` |
-| `MAX_LOOKBACK_MINUTES` | Caps how far a resumed run will query back if the checkpoint is stale | `60` |
+| `SYNC_INTERVAL_MINUTES` | Window size queried by every run, starting from the checkpoint; must match the CronJob schedule | `5` |
 | `CHECKPOINT_CONFIGMAP_NAME` | Name of the ConfigMap used to persist the sync checkpoint | `scarf-sync-checkpoint` |
 
 `LOKI_URL`, `LOKI_USER`, `LOKI_API_KEY`, `SCARF_API_TOKEN`, and

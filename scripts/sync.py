@@ -24,12 +24,9 @@ SCARF_BATCH_SIZE = int(os.getenv("SCARF_BATCH_SIZE", "500"))
 SCARF_MAX_WORKERS = int(os.getenv("SCARF_MAX_WORKERS", "10"))
 
 # Must match the CronJob's schedule interval (charts/values.yaml: sync.intervalMinutes).
-# Only used as the window size for the very first run, before any checkpoint exists.
+# Every run queries exactly this many minutes starting from the checkpoint, so a
+# backlog (outage, failed runs) is worked off one fixed-size window per run.
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "5"))
-
-# Caps how far back a resumed run will query if the checkpoint is stale (e.g. after an
-# outage or several skipped ticks), so a long gap doesn't turn into one huge Loki query.
-MAX_LOOKBACK_MINUTES = int(os.getenv("MAX_LOOKBACK_MINUTES", "60"))
 
 # --- Checkpoint state, persisted in a ConfigMap via the in-cluster Kubernetes API --- #
 SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -100,22 +97,19 @@ def save_checkpoint(end_ns):
 
 def determine_window():
     now_ns = int(time.time() * 1e9)
+    interval_ns = SYNC_INTERVAL_MINUTES * 60 * int(1e9)
     checkpoint_ns = load_checkpoint()
 
     if checkpoint_ns is None:
         print(f"No checkpoint found; using default {SYNC_INTERVAL_MINUTES}-minute window.")
-        return now_ns - SYNC_INTERVAL_MINUTES * 60 * int(1e9), now_ns
+        return now_ns - interval_ns, now_ns
 
-    max_lookback_ns = MAX_LOOKBACK_MINUTES * 60 * int(1e9)
-    if now_ns - checkpoint_ns > max_lookback_ns:
-        skipped_minutes = (now_ns - checkpoint_ns - max_lookback_ns) / 1e9 / 60
-        print(
-            f"Checkpoint is older than MAX_LOOKBACK_MINUTES={MAX_LOOKBACK_MINUTES}; "
-            f"clamping window and permanently skipping ~{skipped_minutes:.1f} minutes of logs."
-        )
-        return now_ns - max_lookback_ns, now_ns
-
-    return checkpoint_ns, now_ns
+    # Never query past "now"; a checkpoint within one interval of now yields a shorter window.
+    end_ns = min(checkpoint_ns + interval_ns, now_ns)
+    behind_minutes = (now_ns - end_ns) / 1e9 / 60
+    if behind_minutes > 0:
+        print(f"Catching up: this window ends {behind_minutes:.1f} minutes behind now.")
+    return checkpoint_ns, end_ns
 
 
 LOKI_PAGE_LIMIT = 5000

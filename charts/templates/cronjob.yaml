@@ -56,8 +56,6 @@ spec:
               value: "{{ .Values.sync.intervalMinutes }}"
             - name: CHECKPOINT_CONFIGMAP_NAME
               value: "{{ .Values.sync.checkpointConfigMapName }}"
-            - name: MAX_LOOKBACK_MINUTES
-              value: "{{ .Values.sync.maxLookbackMinutes }}"
             envFrom:
             - secretRef:
                 name: scarf-loki-credentials
