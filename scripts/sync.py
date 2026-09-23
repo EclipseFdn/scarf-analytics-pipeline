@@ -34,14 +34,33 @@ SCARF_TIMEOUT = (5, 60)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 # Must match the CronJob's schedule interval (charts/values.yaml: sync.intervalMinutes).
-# Every run queries exactly this many minutes starting from the checkpoint, so a
-# backlog (outage, failed runs) is worked off one fixed-size window per run.
+# Each run syncs consecutive windows of this many minutes, starting from the checkpoint,
+# until it reaches "now", so a backlog (outage, failed runs) is worked off within a
+# single run while every Loki query and Scarf export stays window-sized.
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "5"))
 
 # --- Checkpoint state, persisted in a ConfigMap via the in-cluster Kubernetes API --- #
 SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 CHECKPOINT_CONFIGMAP_NAME = os.getenv("CHECKPOINT_CONFIGMAP_NAME", "scarf-sync-checkpoint")
 CHECKPOINT_KEY = "last_synced_until_ns"
+
+# --- Failure alerting via a Slack incoming webhook (unset = alerting disabled) --- #
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+# Alert once the job has failed this many runs in a row; 1 = alert on the first failure.
+ALERT_AFTER_CONSECUTIVE_FAILURES = int(os.getenv("ALERT_AFTER_CONSECUTIVE_FAILURES", "1"))
+# Alert when the checkpoint is more than this far behind real time and still losing
+# ground, i.e. windows take longer to sync than the time they cover.
+LAG_ALERT_MINUTES = int(os.getenv("LAG_ALERT_MINUTES", "60"))
+DEPLOY_ENVIRONMENT = os.getenv("DEPLOY_ENVIRONMENT", "unknown")
+# Stored alongside the checkpoint so an outage alerts once, not on every retry run.
+FAILURE_COUNT_KEY = "consecutive_failures"
+ALERT_SENT_KEY = "failure_alert_sent"
+LAG_ALERT_SENT_KEY = "lag_alert_sent"
+
+
+class SyncError(Exception):
+    """An expected, already-explained failure: the message goes to the logs and the alert
+    as-is, without a traceback."""
 
 
 def _k8s_request(method, path, **kwargs):
@@ -62,64 +81,149 @@ def _k8s_request(method, path, **kwargs):
     )
 
 
-def load_checkpoint():
-    """Returns the end-of-window timestamp (ns) of the last successful run, or None
-    if there isn't one yet (first run) or it can't be read (e.g. running outside a
-    cluster) -- in both cases the caller falls back to the fixed interval window."""
+def load_state():
+    """Returns the checkpoint ConfigMap's data ({} if it doesn't exist yet, i.e. first
+    run), or None if it can't be read (e.g. running outside a cluster)."""
     try:
         resp = _k8s_request("GET", f"/configmaps/{CHECKPOINT_CONFIGMAP_NAME}")
         if resp.status_code == 404:
-            return None
+            return {}
         resp.raise_for_status()
-        raw = resp.json().get("data", {}).get(CHECKPOINT_KEY)
-        return int(raw) if raw else None
+        return resp.json().get("data") or {}
     except Exception as e:
-        print(f"Warning: could not load sync checkpoint, falling back to default window: {e}")
+        print(f"Warning: could not load sync state ConfigMap: {e}")
         return None
 
 
-def save_checkpoint(end_ns):
-    """Persists end_ns as the new high-water mark. Best-effort: if this fails, the
-    next run simply re-queries the same window again (safe, since Scarf events are
-    deduped by $unique_id)."""
+def _patch_state(data):
+    """Merge-patches data into the checkpoint ConfigMap (creating it if missing); keys
+    not in data are left untouched."""
     body = {
         "apiVersion": "v1",
         "kind": "ConfigMap",
         "metadata": {"name": CHECKPOINT_CONFIGMAP_NAME},
-        "data": {
-            CHECKPOINT_KEY: str(end_ns),
-            "last_synced_until_iso": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(end_ns / 1e9)),
-        },
+        "data": data,
     }
+    resp = _k8s_request(
+        "PATCH",
+        f"/configmaps/{CHECKPOINT_CONFIGMAP_NAME}",
+        json=body,
+        headers={"Content-Type": "application/merge-patch+json"},
+    )
+    if resp.status_code == 404:
+        resp = _k8s_request("POST", "/configmaps", json=body)
+    resp.raise_for_status()
+
+
+def _iso(ns):
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ns / 1e9))
+
+
+def save_checkpoint(end_ns):
+    """Persists end_ns as the new high-water mark and clears the failure streak.
+    Best-effort: if this fails, the next run simply re-queries the same window again
+    (safe, since Scarf events are deduped by $unique_id)."""
     try:
-        resp = _k8s_request(
-            "PATCH",
-            f"/configmaps/{CHECKPOINT_CONFIGMAP_NAME}",
-            json=body,
-            headers={"Content-Type": "application/merge-patch+json"},
-        )
-        if resp.status_code == 404:
-            resp = _k8s_request("POST", "/configmaps", json=body)
-        resp.raise_for_status()
+        _patch_state({
+            CHECKPOINT_KEY: str(end_ns),
+            "last_synced_until_iso": _iso(end_ns),
+            FAILURE_COUNT_KEY: "0",
+            ALERT_SENT_KEY: "false",
+        })
     except Exception as e:
         print(f"Warning: failed to persist sync checkpoint, next run will re-query this window: {e}")
 
 
-def determine_window():
+def notify_slack(text):
+    """Posts text to the Slack webhook. Returns whether it was delivered; never raises,
+    so a broken webhook can't mask the job's own result."""
+    if not SLACK_WEBHOOK_URL:
+        print("SLACK_WEBHOOK_URL not set; skipping Slack alert.")
+        return False
+    try:
+        resp = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=10)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"Warning: failed to send Slack alert: {e}")
+        return False
+
+
+def record_failure(state, error, window):
+    """Bumps the consecutive-failure count and alerts once per outage: when the streak
+    reaches ALERT_AFTER_CONSECUTIVE_FAILURES, not again on every retry run after that.
+    If the state couldn't be read the streak is unknown, so alert anyway -- a possibly
+    duplicate alert beats a silent outage."""
+    failures = None if state is None else int(state.get(FAILURE_COUNT_KEY) or 0) + 1
+    already_alerted = state is not None and state.get(ALERT_SENT_KEY) == "true"
+
+    alert_sent = already_alerted
+    if not already_alerted and (failures is None or failures >= ALERT_AFTER_CONSECUTIVE_FAILURES):
+        window_text = f"{_iso(window[0])} to {_iso(window[1])}" if window else "not determined"
+        error_text = str(error)[:1500]
+        alert_sent = notify_slack(
+            f":rotating_light: *Scarf export failing* ({DEPLOY_ENVIRONMENT})\n"
+            f"*Pod:* `{os.getenv('HOSTNAME', 'unknown')}`\n"
+            f"*Consecutive failed runs:* {failures if failures is not None else 'unknown'}\n"
+            f"*Window:* {window_text}\n"
+            f"*Error:* ```{error_text}```\n"
+            "No further alerts will be sent until a run succeeds."
+        )
+
+    if state is not None:
+        try:
+            _patch_state({FAILURE_COUNT_KEY: str(failures), ALERT_SENT_KEY: "true" if alert_sent else "false"})
+        except Exception as e:
+            print(f"Warning: failed to persist failure count: {e}")
+
+
+def check_lag(state, lag_ns, losing_ground, caught_up):
+    """Alerts once when the job is more than LAG_ALERT_MINUTES behind and not catching up,
+    and once more when it has caught up again. A job that is behind but gaining ground
+    (e.g. working off a backlog after an outage) doesn't alert. Returns the new value of
+    the lag-alert-sent flag."""
+    lag_alert_sent = (state or {}).get(LAG_ALERT_SENT_KEY) == "true"
+    lag_minutes = lag_ns / 60e9
+
+    if not lag_alert_sent and losing_ground and lag_minutes > LAG_ALERT_MINUTES:
+        new_value = notify_slack(
+            f":hourglass: *Scarf export falling behind* ({DEPLOY_ENVIRONMENT})\n"
+            f"The sync is {lag_minutes:.0f} minutes behind real time and not catching up: "
+            f"windows are taking longer to sync than the {SYNC_INTERVAL_MINUTES} minutes "
+            "they cover.\nNo further lag alerts will be sent until it catches up."
+        )
+    elif lag_alert_sent and caught_up:
+        notify_slack(f":white_check_mark: *Scarf export caught up* ({DEPLOY_ENVIRONMENT}).")
+        new_value = False
+    else:
+        return lag_alert_sent
+
+    if new_value != lag_alert_sent:
+        try:
+            _patch_state({LAG_ALERT_SENT_KEY: "true" if new_value else "false"})
+        except Exception as e:
+            print(f"Warning: failed to persist lag alert state: {e}")
+    return new_value
+
+
+def determine_window(state):
+    """Returns (start_ns, end_ns, caught_up); caught_up means the window ends at "now",
+    so there is nothing left to sync after it."""
     now_ns = int(time.time() * 1e9)
     interval_ns = SYNC_INTERVAL_MINUTES * 60 * int(1e9)
-    checkpoint_ns = load_checkpoint()
+    raw = (state or {}).get(CHECKPOINT_KEY)
+    checkpoint_ns = int(raw) if raw else None
 
     if checkpoint_ns is None:
         print(f"No checkpoint found; using default {SYNC_INTERVAL_MINUTES}-minute window.")
-        return now_ns - interval_ns, now_ns
+        return now_ns - interval_ns, now_ns, True
 
     # Never query past "now"; a checkpoint within one interval of now yields a shorter window.
     end_ns = min(checkpoint_ns + interval_ns, now_ns)
     behind_minutes = (now_ns - end_ns) / 1e9 / 60
     if behind_minutes > 0:
         print(f"Catching up: this window ends {behind_minutes:.1f} minutes behind now.")
-    return checkpoint_ns, end_ns
+    return checkpoint_ns, end_ns, end_ns == now_ns
 
 
 LOKI_PAGE_LIMIT = 5000
@@ -150,8 +254,7 @@ def fetch_loki_logs(start_ns, end_ns):
             response.raise_for_status()
             payload = response.json()
         except Exception as e:
-            print(f"Error fetching logs from Loki: {e}")
-            sys.exit(1)
+            raise SyncError(f"Error fetching logs from Loki: {e}") from e
 
         results = payload.get("data", {}).get("result", [])
         entry_count = 0
@@ -239,9 +342,10 @@ def parse_telemetry(loki_data):
     return events
 
 def ship_to_scarf(events):
+    """Returns the errors of any batches that failed to ship; empty means all succeeded."""
     if not events:
         print("No telemetry events parsed in this window. Exiting cleanly.")
-        return True
+        return []
 
     print(f"Parsed {len(events)} telemetry events. Initializing authenticated Scarf batch export...")
     headers = {
@@ -302,7 +406,7 @@ def ship_to_scarf(events):
                 print(f"Batch {batch_num}: attempt {attempt}/{SCARF_MAX_ATTEMPTS} failed ({e}); retrying in {delay:.1f}s.")
                 time.sleep(delay)
 
-    all_batches_ok = True
+    failed_batches = []
     with session, concurrent.futures.ThreadPoolExecutor(max_workers=SCARF_MAX_WORKERS) as executor:
         futures = [executor.submit(send_batch, i + 1, batch) for i, batch in enumerate(batches)]
         # Process completions as they arrive; continue draining the rest even
@@ -311,11 +415,11 @@ def ship_to_scarf(events):
             batch_num, batch_len, body, error = future.result()
             if error is not None:
                 print(f"Error shipping batch {batch_num} to Scarf: {error}")
-                all_batches_ok = False
+                failed_batches.append(f"batch {batch_num}: {error}")
             else:
                 print(f"Batch {batch_num}: Sent {batch_len} records. Response: {body}")
 
-    return all_batches_ok
+    return failed_batches
 
 
 def validate_config():
@@ -329,36 +433,76 @@ def validate_config():
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
-        print(f"Error: missing required environment variable(s): {', '.join(missing)}")
-        sys.exit(1)
+        raise SyncError(f"Missing required environment variable(s): {', '.join(missing)}")
+
+def sync_window(start_ns, end_ns):
+    """Fetches, parses and ships one window; raises SyncError if any of it failed."""
+    stage_started_at = time.monotonic()
+    loki_payload = fetch_loki_logs(start_ns, end_ns)
+    print(f"Fetch stage took {time.monotonic() - stage_started_at:.1f}s.")
+
+    stage_started_at = time.monotonic()
+    telemetry_events = parse_telemetry(loki_payload)
+    print(f"Parse stage took {time.monotonic() - stage_started_at:.1f}s.")
+
+    stage_started_at = time.monotonic()
+    failed_batches = ship_to_scarf(telemetry_events)
+    print(f"Ship stage took {time.monotonic() - stage_started_at:.1f}s.")
+
+    if failed_batches:
+        raise SyncError(
+            f"{len(failed_batches)} batch(es) failed to ship to Scarf; checkpoint left "
+            f"unchanged so this window is retried. First error: {failed_batches[0]}"
+        )
+
 
 if __name__ == "__main__":
     run_started_at = time.monotonic()
+    state = load_state()
+    window = None
+    windows_synced = 0
     try:
         validate_config()
-        window_start_ns, window_end_ns = determine_window()
+        # Keep syncing window after window until caught up with "now". concurrencyPolicy:
+        # Forbid skips the CronJob ticks that fire while a long catch-up is still running.
+        while True:
+            window_start_ns, window_end_ns, caught_up = determine_window(state)
+            window = (window_start_ns, window_end_ns)
+            print(f"Syncing window {_iso(window_start_ns)} to {_iso(window_end_ns)}.")
+            lag_before_ns = time.time_ns() - window_start_ns
+            sync_window(window_start_ns, window_end_ns)
+            lag_after_ns = time.time_ns() - window_end_ns
 
-        stage_started_at = time.monotonic()
-        loki_payload = fetch_loki_logs(window_start_ns, window_end_ns)
-        print(f"Fetch stage took {time.monotonic() - stage_started_at:.1f}s.")
-
-        stage_started_at = time.monotonic()
-        telemetry_events = parse_telemetry(loki_payload)
-        print(f"Parse stage took {time.monotonic() - stage_started_at:.1f}s.")
-
-        stage_started_at = time.monotonic()
-        shipped_ok = ship_to_scarf(telemetry_events)
-        print(f"Ship stage took {time.monotonic() - stage_started_at:.1f}s.")
-
-        if shipped_ok:
-            # Only advance the checkpoint once everything shipped -- if this run got cut
-            # short or a batch failed, the next run re-covers the same window instead of
-            # silently losing it (safe: Scarf dedupes on $unique_id).
+            # Only advance the checkpoint once everything in the window shipped -- if a
+            # batch failed, the next run re-covers the same window instead of silently
+            # losing it (safe: Scarf dedupes on $unique_id).
             save_checkpoint(window_end_ns)
-        else:
-            print("One or more batches failed to ship; checkpoint left unchanged so this window is retried.")
-            sys.exit(1)
+            windows_synced += 1
+            if state and state.get(ALERT_SENT_KEY) == "true":
+                notify_slack(
+                    f":white_check_mark: *Scarf export recovered* ({DEPLOY_ENVIRONMENT}) after "
+                    f"{state.get(FAILURE_COUNT_KEY, '?')} failed run(s)."
+                )
+            # Mirror what save_checkpoint persisted, so the next window starts from here and
+            # a later failure in this run counts its streak from zero.
+            state = {
+                **(state or {}),
+                CHECKPOINT_KEY: str(window_end_ns),
+                FAILURE_COUNT_KEY: "0",
+                ALERT_SENT_KEY: "false",
+            }
+            # Lag only shrinks if the window synced faster than the time it covers.
+            lag_alert_sent = check_lag(state, lag_after_ns, lag_after_ns >= lag_before_ns, caught_up)
+            state[LAG_ALERT_SENT_KEY] = "true" if lag_alert_sent else "false"
+            if caught_up:
+                break
+    except Exception as e:
+        if not isinstance(e, SyncError):
+            traceback.print_exc()
+        print(f"Error: {e}")
+        record_failure(state, e, window)
+        sys.exit(1)
     finally:
-        # Runs even on sys.exit() from validate_config/fetch_loki_logs, so every
-        # run -- successful or not -- reports how long it took.
-        print(f"Run finished in {time.monotonic() - run_started_at:.1f}s.")
+        # Runs even when the run fails, so every run -- successful or not -- reports
+        # how long it took.
+        print(f"Run finished in {time.monotonic() - run_started_at:.1f}s ({windows_synced} window(s) synced).")

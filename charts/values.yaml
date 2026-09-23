@@ -1,7 +1,7 @@
 # Default values
 
 name: &name open-vsx-scarf-analytics
-environment: &environment staging
+environment: &environment production
 platform: &platform okd-c1
 
 image:
@@ -35,3 +35,14 @@ sync:
     organizationName: OpenVSX
     batchSize: 5000
     maxWorkers: 5
+
+  alerting:
+    # Failed runs are reported to the Slack incoming webhook in the SLACK_WEBHOOK_URL key
+    # of the scarf-loki-credentials secret (alerting is disabled if it's unset). One alert
+    # is sent per outage, once this many runs have failed in a row, plus a recovery
+    # message when a run next succeeds.
+    afterConsecutiveFailures: 1
+    # Also alert (once, plus a message when it catches up) if the sync is more than this
+    # many minutes behind real time and still losing ground, i.e. each window takes
+    # longer to sync than the time it covers.
+    lagMinutes: 60

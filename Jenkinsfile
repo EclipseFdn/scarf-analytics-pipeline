@@ -78,7 +78,7 @@ pipeline {
       }
     }
 
-    stage('Deploy staging') {
+    stage('Deploy production') {
       when {
         branch 'main'
       }
@@ -86,7 +86,7 @@ pipeline {
         container('kubectl') {
           withKubeConfig([credentialsId: 'ci-bot-okd-c1-token', serverUrl: 'https://api.okd-c1.eclipse.org:6443']) {
             sh '''
-              ./kubernetes/helm-deploy.sh staging "${IMAGE_TAG}"
+              ./kubernetes/helm-deploy.sh production "${IMAGE_TAG}"
             '''
           }
         }

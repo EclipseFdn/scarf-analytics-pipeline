@@ -18,7 +18,7 @@ SCRIPT_FOLDER="$(dirname "$(readlink -f "${0}")")"
 ROOT_DIR="${SCRIPT_FOLDER}/.."
 CHART_DIR="${ROOT_DIR}/charts"
 
-release_name="staging"
+release_name="production"
 namespace="openvsx-scarf-analytics"
 
 environment="${1:-}"
@@ -32,8 +32,8 @@ if [[ -z "${environment}" ]]; then
   exit 1
 fi
 
-if [[ "${environment}" != "staging" ]]; then
-  printf "ERROR: Unknown environment '%s'. Only 'staging' is currently supported.\n" "${environment}"
+if [[ "${environment}" != "production" ]]; then
+  printf "ERROR: Unknown environment '%s'. Only 'production' is currently supported.\n" "${environment}"
   exit 1
 fi
 

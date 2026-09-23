@@ -11,10 +11,9 @@ interval (default: every 5 minutes). Each run:
 
 1. **Determines the query window.** The end of the last successful run is
    read from a checkpoint `ConfigMap` (`scarf-sync-checkpoint` by default).
-   Each run queries exactly `SYNC_INTERVAL_MINUTES` starting from the
-   checkpoint (capped at the current time). If the job falls behind (e.g. after
-   an outage), it catches up one window per run without skipping any logs. If
-   no checkpoint exists yet, it queries the last `SYNC_INTERVAL_MINUTES`.
+   Each window is `SYNC_INTERVAL_MINUTES` long, starting from the checkpoint
+   (capped at the current time). If no checkpoint exists yet, it queries the
+   last `SYNC_INTERVAL_MINUTES`.
 2. **Fetches logs from Loki** via `query_range` for that window.
 3. **Parses each log line** into a Scarf event, typed `download` or `request`
    depending on whether the URL looks like a download, deduplicated by a
@@ -25,6 +24,10 @@ interval (default: every 5 minutes). Each run:
 5. **Advances the checkpoint** only if every batch shipped successfully. If
    any batch fails, the checkpoint is left unchanged so the next run retries
    the same window (safe, since Scarf dedupes on `$unique_id`).
+6. **Repeats with the next window** until it reaches the current time. If the
+   job falls behind (e.g. after an outage), a single run works through the
+   backlog one window at a time. A failed window stops the run, and the next run
+   picks up from the last window that succeeded.
 
 ## Repository layout
 
@@ -57,12 +60,33 @@ secret in the target namespace.
 | `ORGANIZATION_NAME` | Scarf organization name | `OpenVSX` |
 | `SCARF_BATCH_SIZE` | Max events per Scarf import request | `500` |
 | `SYNC_INTERVAL_MINUTES` | Window size queried by every run, starting from the checkpoint; must match the CronJob schedule | `5` |
+| `SLACK_WEBHOOK_URL` | Slack incoming webhook that failed runs are reported to; alerting is disabled if unset (secret) | — |
+| `ALERT_AFTER_CONSECUTIVE_FAILURES` | Consecutive failed runs before an alert is sent | `1` |
+| `LAG_ALERT_MINUTES` | Alert when the sync is more than this many minutes behind real time and not catching up | `60` |
+| `DEPLOY_ENVIRONMENT` | Environment name shown in alerts (set from `environment` in `values.yaml`) | `unknown` |
 | `CHECKPOINT_CONFIGMAP_NAME` | Name of the ConfigMap used to persist the sync checkpoint | `scarf-sync-checkpoint` |
 
-`LOKI_URL`, `LOKI_USER`, `LOKI_API_KEY`, `SCARF_API_TOKEN`, and
-`SCARF_ENTITY_ID` are expected to come from the `scarf-loki-credentials`
+`LOKI_URL`, `LOKI_USER`, `LOKI_API_KEY`, `SCARF_API_TOKEN`,
+`SCARF_ENTITY_ID`, and `SLACK_WEBHOOK_URL` are expected to come from the `scarf-loki-credentials`
 Kubernetes secret (referenced via `envFrom` in the CronJob template) rather
 than `values.yaml`.
+
+## Alerting
+
+Any failed run (missing config, Loki errors, a Scarf batch that still fails
+after retries, or an unexpected exception) posts to `SLACK_WEBHOOK_URL`. The
+count of consecutive failed runs is kept in the checkpoint `ConfigMap`, so an
+outage produces one alert (once `ALERT_AFTER_CONSECUTIVE_FAILURES` is reached),
+not one every run, and a recovery message follows the next successful run.
+
+A second alert covers the job falling behind without failing: if the
+checkpoint is more than `LAG_ALERT_MINUTES` behind real time *and* windows are
+taking longer to sync than the time they cover, it posts once, then again when
+it catches up. Working off a backlog after an outage doesn't trigger it, as
+long as the job is gaining ground.
+
+This only covers failures `sync.py` can see. If the pod never runs or is
+killed (image pull errors, OOMKilled), no alert is sent.
 
 ## Running locally
 

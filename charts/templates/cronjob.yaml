@@ -56,6 +56,12 @@ spec:
               value: "{{ .Values.sync.intervalMinutes }}"
             - name: CHECKPOINT_CONFIGMAP_NAME
               value: "{{ .Values.sync.checkpointConfigMapName }}"
+            - name: DEPLOY_ENVIRONMENT
+              value: "{{ .Values.environment }}"
+            - name: ALERT_AFTER_CONSECUTIVE_FAILURES
+              value: "{{ .Values.sync.alerting.afterConsecutiveFailures }}"
+            - name: LAG_ALERT_MINUTES
+              value: "{{ .Values.sync.alerting.lagMinutes }}"
             envFrom:
             - secretRef:
                 name: scarf-loki-credentials
