@@ -35,6 +35,9 @@ interval (default: every 5 minutes). Each run:
 scripts/
   sync.py             # The sync job itself
   requirements.txt    # Python dependencies
+tests/
+  test_sync.py        # Unit tests for sync.py
+  requirements.txt    # Test dependencies (runtime deps + pytest)
 charts/               # Helm chart deploying the CronJob, RBAC, etc.
 kubernetes/
   helm-deploy.sh       # Deploys the Helm chart to a target environment
@@ -106,6 +109,17 @@ python scripts/sync.py
 Outside a cluster, checkpoint reads/writes fail gracefully (no in-cluster
 service account is available), so each local run falls back to the default
 `SYNC_INTERVAL_MINUTES` window.
+
+## Running tests
+
+```bash
+pip install -r tests/requirements.txt
+python -m pytest tests
+```
+
+The tests in [`tests/test_sync.py`](tests/test_sync.py) fake Loki, Scarf,
+Slack, the checkpoint `ConfigMap` and the clock, so they run offline in well
+under a second.
 
 ## Deployment
 

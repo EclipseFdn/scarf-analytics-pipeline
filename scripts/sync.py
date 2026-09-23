@@ -456,7 +456,7 @@ def sync_window(start_ns, end_ns):
         )
 
 
-if __name__ == "__main__":
+def main():
     run_started_at = time.monotonic()
     state = load_state()
     window = None
@@ -506,3 +506,7 @@ if __name__ == "__main__":
         # Runs even when the run fails, so every run -- successful or not -- reports
         # how long it took.
         print(f"Run finished in {time.monotonic() - run_started_at:.1f}s ({windows_synced} window(s) synced).")
+
+
+if __name__ == "__main__":
+    main()

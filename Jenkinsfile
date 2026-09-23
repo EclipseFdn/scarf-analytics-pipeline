@@ -20,6 +20,16 @@ pipeline {
             - mountPath: "/home/default/.kube"
               name: "dot-kube"
               readOnly: false
+          - name: python
+            # Same base as the Dockerfile, so tests run on the production Python version
+            image: python:3.11-slim
+            command:
+            - cat
+            tty: true
+            resources:
+              limits:
+                cpu: 1
+                memory: 1Gi
           - name: jnlp
             resources:
               limits:
@@ -54,6 +64,26 @@ pipeline {
   }
 
   stages {
+    stage('Run tests') {
+      steps {
+        container('python') {
+          // A workspace venv rather than a global install: the agent pod may run as an
+          // arbitrary UID with no writable site-packages or $HOME.
+          sh '''
+            python -m venv .venv
+            .venv/bin/pip install --no-cache-dir -r tests/requirements.txt
+            PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests \
+              -p no:cacheprovider --junitxml=test-results.xml
+          '''
+        }
+      }
+      post {
+        always {
+          junit testResults: 'test-results.xml', allowEmptyResults: true
+        }
+      }
+    }
+
     stage('Build docker image') {
       agent {
         label 'docker-build'
