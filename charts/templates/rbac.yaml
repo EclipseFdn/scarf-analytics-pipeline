@@ -3,6 +3,12 @@ kind: ServiceAccount
 metadata:
   name: scarf-sync
   namespace: {{ .Release.Namespace }}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+{{- range . }}
+  - name: {{ . }}
+{{- end }}
+{{- end }}
 ---
 # Scoped to just enough to read/write the sync checkpoint ConfigMap: get/update/patch
 # are restricted to that one resource name; create has no resourceNames since the

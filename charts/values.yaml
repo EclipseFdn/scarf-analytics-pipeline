@@ -9,6 +9,13 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# Secret(s) granting the scarf-sync ServiceAccount pull access to the GHCR image,
+# e.g. a `kubectl create secret docker-registry` secret created out-of-band in the
+# target namespace. Applied to the ServiceAccount so it survives every `helm upgrade`
+# instead of being wiped, since Helm re-creates that ServiceAccount object on every deploy.
+imagePullSecrets:
+  - dockerconfigjson-for-pull-as-scarf-sync
+
 sync:
   # How often the CronJob fires, and the Loki window sync.py pulls on its very first
   # run (before a checkpoint exists). Must evenly divide 60 (1, 2, 3, 4, 5, 6, 10, 12,

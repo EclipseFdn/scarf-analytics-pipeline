@@ -36,7 +36,7 @@ scripts/
 charts/               # Helm chart deploying the CronJob, RBAC, etc.
 kubernetes/
   helm-deploy.sh       # Deploys the Helm chart to a target environment
-  clusterroles.yaml     # Cluster-level RBAC needed for Jenkins to deploy
+  namespace-rbac.yaml  # Namespace-scoped RBAC needed for Jenkins to deploy
 Dockerfile            # Multi-stage build producing the sync-job image
 Jenkinsfile           # CI: build, push, and deploy to staging on main
 ```
@@ -96,7 +96,7 @@ checkpoint `ConfigMap`.
 ```
 
 See [`kubernetes/README.md`](kubernetes/README.md) for one-time cluster
-setup (applying `clusterroles.yaml` for Jenkins).
+setup (applying `namespace-rbac.yaml` for Jenkins).
 
 CI/CD is handled by the [`Jenkinsfile`](Jenkinsfile): every build produces
 and pushes a Docker image to `ghcr.io/eclipsefdn/scarf-analytics`, and
