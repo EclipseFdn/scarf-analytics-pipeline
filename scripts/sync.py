@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import hashlib
+import random
 import requests
 import json
 import logging
@@ -22,6 +23,15 @@ SCARF_ENTITY_ID = os.getenv("SCARF_ENTITY_ID")
 ORGANIZATION_NAME = os.getenv("ORGANIZATION_NAME", "OpenVSX")
 SCARF_BATCH_SIZE = int(os.getenv("SCARF_BATCH_SIZE", "500"))
 SCARF_MAX_WORKERS = int(os.getenv("SCARF_MAX_WORKERS", "10"))
+
+# Transient Scarf failures (timeouts, connection drops, 429, 5xx) are retried per batch
+# with exponential backoff, so one slow moment doesn't force re-shipping the whole window.
+# Retrying a request that timed out after Scarf received it is safe: Scarf dedupes on $unique_id.
+SCARF_MAX_ATTEMPTS = 4
+SCARF_BACKOFF_BASE_SECONDS = 2
+# (connect, read): fail fast if Scarf is unreachable, but give a slow-but-alive import more room.
+SCARF_TIMEOUT = (5, 60)
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 # Must match the CronJob's schedule interval (charts/values.yaml: sync.intervalMinutes).
 # Every run queries exactly this many minutes starting from the checkpoint, so a
@@ -255,19 +265,42 @@ def ship_to_scarf(events):
     def send_batch(batch_num, batch):
         # Scarf's import API expects newline-delimited JSON: one event object
         # per line, NOT a single JSON document wrapping them in an array/object
-        ndjson_body = "\n".join(json.dumps(event) for event in batch)
-        try:
-            res = session.post(url, data=ndjson_body.encode("utf-8"), headers=headers, timeout=30)
-            res.raise_for_status()
-            # HTTP 200 only means Scarf accepted the request, not that every event
-            # ingested cleanly -- check the response body for per-event rejections
+        ndjson_body = "\n".join(json.dumps(event) for event in batch).encode("utf-8")
+        for attempt in range(1, SCARF_MAX_ATTEMPTS + 1):
+            retry_after = None
             try:
-                body = res.json()
-            except ValueError:
-                body = res.text
-            return batch_num, len(batch), body, None
-        except Exception as e:
-            return batch_num, len(batch), None, e
+                res = session.post(url, data=ndjson_body, headers=headers, timeout=SCARF_TIMEOUT)
+                if res.status_code in RETRYABLE_STATUS_CODES:
+                    retry_after = res.headers.get("Retry-After")
+                res.raise_for_status()
+                # HTTP 200 only means Scarf accepted the request, not that every event
+                # ingested cleanly -- check the response body for per-event rejections
+                try:
+                    body = res.json()
+                except ValueError:
+                    body = res.text
+                return batch_num, len(batch), body, None
+            except Exception as e:
+                response = getattr(e, "response", None)
+                retryable = (
+                    isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
+                    or (isinstance(e, requests.exceptions.HTTPError)
+                        and response is not None
+                        and (response.status_code in RETRYABLE_STATUS_CODES
+                             # Scarf caps active imports at 15 per account; wait for some to drain.
+                             or (response.status_code == 422
+                                 and "too many active imports" in response.text.lower())))
+                )
+                if not retryable or attempt == SCARF_MAX_ATTEMPTS:
+                    return batch_num, len(batch), None, e
+
+                delay = SCARF_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)
+                if retry_after and retry_after.isdigit():
+                    delay = max(delay, int(retry_after))
+                # Jitter keeps all workers from retrying in lockstep after a shared stall.
+                delay += random.uniform(0, 1)
+                print(f"Batch {batch_num}: attempt {attempt}/{SCARF_MAX_ATTEMPTS} failed ({e}); retrying in {delay:.1f}s.")
+                time.sleep(delay)
 
     all_batches_ok = True
     with session, concurrent.futures.ThreadPoolExecutor(max_workers=SCARF_MAX_WORKERS) as executor:
