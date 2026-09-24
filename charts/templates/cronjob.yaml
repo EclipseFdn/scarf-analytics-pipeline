@@ -16,6 +16,8 @@ spec:
         metadata:
           labels:
             app: scarf-sync-pipeline
+            # Opts every job pod into log collection by Grafana
+            logging.grafana.com/collect: "true"
         spec:
           serviceAccountName: scarf-sync
           securityContext:
