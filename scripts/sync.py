@@ -327,7 +327,15 @@ def parse_telemetry(loki_data):
                     "status_message": log_json.get("status_message"),
                     "state": log_json.get("state")
                 }
-                
+
+                # What actually happened before the CDN masked a 5xx as a generic 503;
+                # "status"/"status_message" are what the client was sent. Only added when
+                # logged, so lines from before the CDN logged them keep their old shape.
+                # Fastly logs a header that isn't set as the literal string "(null)".
+                for field in ("original_status", "original_status_message"):
+                    if log_json.get(field) not in (None, "", "(null)"):
+                        event[field] = log_json[field]
+
                 # Filter out lines that miss essential traffic data
                 if event["$remote_address"] or event["$user_agent"]:
                     events.append(event)

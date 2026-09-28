@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import sync  # noqa: E402
 
 MINUTE_NS = 60 * 10**9
+# Log fields the CDN added later; forwarded to Scarf only when a line has them.
+OPTIONAL_FIELDS = ("original_status", "original_status_message")
 # A fixed "now", aligned to the minute so window boundaries are easy to reason about.
 NOW_NS = 1_750_000_020 * 10**9
 
@@ -176,6 +178,52 @@ class TestParseTelemetry:
         assert event["url"] == "/api/foo"
         assert event["request_method"] == "GET"
         assert event["status"] == 200
+
+    def test_keeps_original_status_of_masked_errors(self):
+        value = loki_line(
+            NOW_NS,
+            status=503,
+            status_message="Service Unavailable",
+            original_status="502",
+            original_status_message="Bad Gateway",
+        )
+        [event] = sync.parse_telemetry(loki_payload([value]))
+        assert event["status"] == 503
+        assert event["status_message"] == "Service Unavailable"
+        assert event["original_status"] == "502"
+        assert event["original_status_message"] == "Bad Gateway"
+
+    def test_request_id_is_not_forwarded(self):
+        [event] = sync.parse_telemetry(loki_payload([loki_line(NOW_NS, request_id="cache-yyz1-2347992582")]))
+        assert "request_id" not in event
+
+    def test_otherwise_identical_requests_get_distinct_unique_ids(self):
+        # request_id in the log line makes separate requests with the same fields hash
+        # differently; without it they log identical lines and Scarf would merge them.
+        first, second = sync.parse_telemetry(loki_payload([
+            loki_line(NOW_NS, request_id="cache-yyz1-1"),
+            loki_line(NOW_NS, request_id="cache-yyz1-2"),
+        ]))
+        assert first["$unique_id"] != second["$unique_id"]
+
+    def test_lines_logged_without_new_fields_keep_old_shape(self):
+        [event] = sync.parse_telemetry(loki_payload([loki_line(NOW_NS, status=200, status_message="OK")]))
+        assert event["status"] == 200
+        assert event["status_message"] == "OK"
+        for field in OPTIONAL_FIELDS:
+            assert field not in event
+
+    @pytest.mark.parametrize("unset", ["(null)", "", None])
+    def test_unset_new_fields_are_treated_as_absent(self, unset):
+        value = loki_line(NOW_NS, status="200", **{field: unset for field in OPTIONAL_FIELDS})
+        [event] = sync.parse_telemetry(loki_payload([value]))
+        for field in OPTIONAL_FIELDS:
+            assert field not in event
+
+    def test_new_fields_are_independent(self):
+        [event] = sync.parse_telemetry(loki_payload([loki_line(NOW_NS, original_status="502", original_status_message="(null)")]))
+        assert event["original_status"] == "502"
+        assert "original_status_message" not in event
 
     def test_download_urls_are_typed_download_case_insensitively(self):
         [event] = sync.parse_telemetry(loki_payload([loki_line(NOW_NS, url="/vscode/Download/x.vsix")]))
