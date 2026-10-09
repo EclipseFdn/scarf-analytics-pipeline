@@ -345,6 +345,12 @@ class TestShipToScarf:
         assert len(scarf.calls) == 2
         assert len(clock.sleeps) == 1
 
+    def test_backs_off_exponentially_between_attempts(self, scarf, clock):
+        scarf.responses = [FakeResponse(503)] * (sync.SCARF_MAX_ATTEMPTS - 1)
+        assert sync.ship_to_scarf(self.events(1)) == []
+        # Sleeps are 20s, 40s, 80s, 160s plus up to 1s of jitter each.
+        assert [int(s) for s in clock.sleeps] == [20, 40, 80, 160]
+
     def test_honours_retry_after_when_longer_than_backoff(self, scarf, clock):
         scarf.responses = [FakeResponse(429, headers={"Retry-After": "30"})]
         sync.ship_to_scarf(self.events(1))

@@ -27,8 +27,8 @@ SCARF_MAX_WORKERS = int(os.getenv("SCARF_MAX_WORKERS", "10"))
 # Transient Scarf failures (timeouts, connection drops, 429, 5xx) are retried per batch
 # with exponential backoff, so one slow moment doesn't force re-shipping the whole window.
 # Retrying a request that timed out after Scarf received it is safe: Scarf dedupes on $unique_id.
-SCARF_MAX_ATTEMPTS = 4
-SCARF_BACKOFF_BASE_SECONDS = 2
+SCARF_MAX_ATTEMPTS = 5
+SCARF_BACKOFF_BASE_SECONDS = 20
 # (connect, read): fail fast if Scarf is unreachable, but give a slow-but-alive import more room.
 SCARF_TIMEOUT = (5, 60)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
