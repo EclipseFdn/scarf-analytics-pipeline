@@ -42,8 +42,9 @@ spec:
                 # The whole window's log lines, parsed events, and per-batch ndjson
                 # payloads are all held in memory at once (no streaming), so this is
                 # a conservative headroom bump, not a verified-safe number -- revisit
-                # once we've load-tested against an actual peak-RPS window.
-                memory: "1Gi"
+                # once we've load-tested against an actual peak-RPS window. 1Gi was
+                # OOMKilled on a ~578k-line window (2026-09-30 16:15Z).
+                memory: "3Gi"
                 cpu: "1000m"
             env:
             - name: LOKI_QUERY
