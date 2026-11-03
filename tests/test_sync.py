@@ -306,6 +306,21 @@ class TestFetchLokiLogs:
         sync.fetch_loki_logs(NOW_NS, NOW_NS + MINUTE_NS)
         assert len(calls) == 1
 
+    def test_stops_fetching_once_window_exceeds_max_entries(self, monkeypatch, config):
+        monkeypatch.setattr(sync, "LOKI_PAGE_LIMIT", 2)
+        monkeypatch.setattr(sync, "LOKI_MAX_WINDOW_ENTRIES", 3)
+        calls = []
+
+        def get(url, params=None, **kwargs):
+            calls.append(params)
+            n = len(calls)
+            return FakeResponse(200, loki_payload([loki_line(NOW_NS + 2 * n + i) for i in range(2)]))
+
+        monkeypatch.setattr(sync.requests, "get", get)
+        with pytest.raises(sync.WindowTooLarge):
+            sync.fetch_loki_logs(NOW_NS, NOW_NS + MINUTE_NS)
+        assert len(calls) == 2  # 4 entries > 3: gave up without fetching the rest
+
     def test_loki_error_raises_sync_error(self, monkeypatch, config):
         monkeypatch.setattr(sync.requests, "get", lambda *a, **k: FakeResponse(503))
         with pytest.raises(sync.SyncError, match="Error fetching logs from Loki"):
@@ -524,6 +539,53 @@ class TestMain:
         for (_, prev_end), (next_start, _) in zip(loki.windows, loki.windows[1:]):
             assert next_start == prev_end  # contiguous: nothing skipped or re-queried
         assert configmap.data[sync.CHECKPOINT_KEY] == str(loki.windows[-1][1])
+
+    @pytest.fixture
+    def spiky_loki(self, monkeypatch, clock):
+        """Fake Loki over fixed log timestamps (.entries_ns), returning those in each
+        queried window; set LOKI_MAX_WINDOW_ENTRIES low to make windows "too large"."""
+        fake = types.SimpleNamespace(windows=[], entries_ns=[])
+
+        def get(url, params=None, **kwargs):
+            start, end = params["start"], params["end"]
+            fake.windows.append((start, end))
+            clock.advance(1)
+            values = [loki_line(ts) for ts in fake.entries_ns if start <= ts < end]
+            return FakeResponse(200, loki_payload(values))
+
+        monkeypatch.setattr(sync.requests, "get", get)
+        return fake
+
+    def test_splits_oversized_window_then_grows_back(self, monkeypatch, spiky_loki, configmap, clock):
+        monkeypatch.setattr(sync, "LOKI_MAX_WINDOW_ENTRIES", 1)
+        checkpoint = NOW_NS - 15 * MINUTE_NS
+        configmap.data = {sync.CHECKPOINT_KEY: str(checkpoint)}
+        spiky_loki.entries_ns = [checkpoint + 10 * 10**9, checkpoint + 20 * 10**9]
+        sync.main()
+
+        synced = [
+            (start, end) for start, end in spiky_loki.windows
+            if sum(start <= ts < end for ts in spiky_loki.entries_ns) <= 1
+        ]
+        assert synced[0][0] == checkpoint
+        for (_, prev_end), (next_start, _) in zip(synced, synced[1:]):
+            assert next_start == prev_end  # contiguous: nothing skipped
+        assert max(end - start for start, end in synced) == 5 * MINUTE_NS  # grew back
+        assert configmap.data[sync.CHECKPOINT_KEY] == str(synced[-1][1])
+        assert synced[-1][1] == clock.now_ns - 10**9  # caught up (last fetch advanced the clock 1s)
+
+    def test_window_too_large_at_minimum_size_fails_and_alerts(self, monkeypatch, spiky_loki, configmap, slack):
+        monkeypatch.setattr(sync, "LOKI_MAX_WINDOW_ENTRIES", 1)
+        checkpoint = NOW_NS - 15 * MINUTE_NS
+        configmap.data = {sync.CHECKPOINT_KEY: str(checkpoint)}
+        spiky_loki.entries_ns = [checkpoint + 10 * 10**9, checkpoint + 10 * 10**9 + 1]
+
+        with pytest.raises(SystemExit):
+            sync.main()
+
+        assert spiky_loki.windows[-1][1] - spiky_loki.windows[-1][0] == sync.MIN_WINDOW_SECONDS * 10**9
+        assert int(configmap.data[sync.CHECKPOINT_KEY]) <= checkpoint + 10 * 10**9
+        assert "Cannot split window any further" in slack.messages[0]
 
     def test_first_run_syncs_last_interval(self, loki, configmap):
         sync.main()

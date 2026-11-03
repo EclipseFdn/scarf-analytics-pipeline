@@ -39,6 +39,13 @@ RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 # single run while every Loki query and Scarf export stays window-sized.
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "5"))
 
+# A whole window is held in memory at once, so a traffic spike can OOMKill the pod (which
+# sync.py can't alert on) and wedge the checkpoint on that window forever. Instead, a
+# window with more Loki entries than this is abandoned mid-fetch and retried at half the
+# length, down to MIN_WINDOW_SECONDS; the length then doubles back after each success.
+LOKI_MAX_WINDOW_ENTRIES = int(os.getenv("LOKI_MAX_WINDOW_ENTRIES", "500000"))
+MIN_WINDOW_SECONDS = 1
+
 # --- Checkpoint state, persisted in a ConfigMap via the in-cluster Kubernetes API --- #
 SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 CHECKPOINT_CONFIGMAP_NAME = os.getenv("CHECKPOINT_CONFIGMAP_NAME", "scarf-sync-checkpoint")
@@ -61,6 +68,11 @@ LAG_ALERT_SENT_KEY = "lag_alert_sent"
 class SyncError(Exception):
     """An expected, already-explained failure: the message goes to the logs and the alert
     as-is, without a traceback."""
+
+
+class WindowTooLarge(SyncError):
+    """The window holds more than LOKI_MAX_WINDOW_ENTRIES entries; main() retries it
+    split in half."""
 
 
 def _k8s_request(method, path, **kwargs):
@@ -206,24 +218,31 @@ def check_lag(state, lag_ns, losing_ground, caught_up):
     return new_value
 
 
-def determine_window(state):
+def interval_ns():
+    return SYNC_INTERVAL_MINUTES * 60 * int(1e9)
+
+
+def determine_window(state, span_ns=None):
     """Returns (start_ns, end_ns, caught_up); caught_up means the window ends at "now",
-    so there is nothing left to sync after it."""
+    so there is nothing left to sync after it. span_ns caps the window's length (default:
+    the full interval), for splitting windows with too many entries."""
     now_ns = int(time.time() * 1e9)
-    interval_ns = SYNC_INTERVAL_MINUTES * 60 * int(1e9)
+    span_ns = span_ns or interval_ns()
     raw = (state or {}).get(CHECKPOINT_KEY)
     checkpoint_ns = int(raw) if raw else None
 
     if checkpoint_ns is None:
         print(f"No checkpoint found; using default {SYNC_INTERVAL_MINUTES}-minute window.")
-        return now_ns - interval_ns, now_ns, True
+        start_ns = now_ns - interval_ns()
+    else:
+        start_ns = checkpoint_ns
 
     # Never query past "now"; a checkpoint within one interval of now yields a shorter window.
-    end_ns = min(checkpoint_ns + interval_ns, now_ns)
+    end_ns = min(start_ns + span_ns, now_ns)
     behind_minutes = (now_ns - end_ns) / 1e9 / 60
-    if behind_minutes > 0:
+    if behind_minutes > 0 and checkpoint_ns is not None:
         print(f"Catching up: this window ends {behind_minutes:.1f} minutes behind now.")
-    return checkpoint_ns, end_ns, end_ns == now_ns
+    return start_ns, end_ns, end_ns == now_ns
 
 
 LOKI_PAGE_LIMIT = 5000
@@ -277,6 +296,12 @@ def fetch_loki_logs(start_ns, end_ns):
                 combined_results.append({"stream": stream.get("stream", {}), "values": new_values})
 
         print(f"Loki page {page}: fetched {entry_count} entries (start={cursor_start}).")
+
+        if len(seen_entries) > LOKI_MAX_WINDOW_ENTRIES:
+            raise WindowTooLarge(
+                f"window has more than {LOKI_MAX_WINDOW_ENTRIES} Loki entries "
+                f"(LOKI_MAX_WINDOW_ENTRIES); stopped fetching at page {page}"
+            )
 
         if entry_count < LOKI_PAGE_LIMIT:
             break
@@ -469,17 +494,27 @@ def main():
     state = load_state()
     window = None
     windows_synced = 0
+    span_ns = interval_ns()
     try:
         validate_config()
         # Keep syncing window after window until caught up with "now". concurrencyPolicy:
         # Forbid skips the CronJob ticks that fire while a long catch-up is still running.
         while True:
-            window_start_ns, window_end_ns, caught_up = determine_window(state)
+            window_start_ns, window_end_ns, caught_up = determine_window(state, span_ns)
             window = (window_start_ns, window_end_ns)
             print(f"Syncing window {_iso(window_start_ns)} to {_iso(window_end_ns)}.")
             lag_before_ns = time.time_ns() - window_start_ns
-            sync_window(window_start_ns, window_end_ns)
+            try:
+                sync_window(window_start_ns, window_end_ns)
+            except WindowTooLarge as e:
+                if window_end_ns - window_start_ns <= MIN_WINDOW_SECONDS * int(1e9):
+                    raise SyncError(f"Cannot split window any further: {e}") from e
+                span_ns = max((window_end_ns - window_start_ns) // 2, MIN_WINDOW_SECONDS * int(1e9))
+                print(f"Splitting window: {e}; retrying with a {span_ns / 1e9:.1f}s window.")
+                continue
             lag_after_ns = time.time_ns() - window_end_ns
+            # Grow back toward the full interval once past the spike.
+            span_ns = min(span_ns * 2, interval_ns())
 
             # Only advance the checkpoint once everything in the window shipped -- if a
             # batch failed, the next run re-covers the same window instead of silently

@@ -30,6 +30,10 @@ sync:
     # url comes from the scarf-loki-credentials Kubernetes secret (LOKI_URL key),
     # not this file -- see README "Configuration".
     query: '{service_name="fastly_cdn", env="production"}'
+    # A window with more log lines than this is split in half and retried (down to 1s),
+    # so a traffic spike can't OOMKill the pod. Normal 5-minute windows are ~110k lines;
+    # keep this well under what the memory limit in templates/cronjob.yaml can hold.
+    maxWindowEntries: 500000
 
   scarf:
     organizationName: OpenVSX

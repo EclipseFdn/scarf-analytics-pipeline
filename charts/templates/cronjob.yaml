@@ -43,12 +43,16 @@ spec:
                 # payloads are all held in memory at once (no streaming), so this is
                 # a conservative headroom bump, not a verified-safe number -- revisit
                 # once we've load-tested against an actual peak-RPS window. 1Gi was
-                # OOMKilled on a ~578k-line window (2026-09-30 16:15Z).
+                # OOMKilled on a ~578k-line window (2026-09-30 16:15Z), 3Gi on a
+                # ~1.83M-line one (2026-11-01 02:35Z). sync.loki.maxWindowEntries now
+                # splits oversized windows, so keep it well below what this holds.
                 memory: "3Gi"
                 cpu: "1000m"
             env:
             - name: LOKI_QUERY
               value: {{ .Values.sync.loki.query | quote }}
+            - name: LOKI_MAX_WINDOW_ENTRIES
+              value: "{{ .Values.sync.loki.maxWindowEntries }}"
             - name: ORGANIZATION_NAME
               value: "{{ .Values.sync.scarf.organizationName }}"
             - name: SCARF_BATCH_SIZE

@@ -14,7 +14,10 @@ interval (default: every 5 minutes). Each run:
    Each window is `SYNC_INTERVAL_MINUTES` long, starting from the checkpoint
    (capped at the current time). If no checkpoint exists yet, it queries the
    last `SYNC_INTERVAL_MINUTES`.
-2. **Fetches logs from Loki** via `query_range` for that window.
+2. **Fetches logs from Loki** via `query_range` for that window. If the window
+   holds more than `LOKI_MAX_WINDOW_ENTRIES` lines (a traffic spike), the fetch
+   is abandoned and the window retried at half the length, down to 1 second, so
+   the pod isn't OOMKilled; later windows double back to full length.
 3. **Parses each log line** into a Scarf event, typed `download` or `request`
    depending on whether the URL looks like a download, deduplicated by a
    SHA-256 hash of the raw log line (`$unique_id`), and filters out lines
@@ -63,6 +66,7 @@ secret in the target namespace.
 | `ORGANIZATION_NAME` | Scarf organization name | `OpenVSX` |
 | `SCARF_BATCH_SIZE` | Max events per Scarf import request | `500` |
 | `SYNC_INTERVAL_MINUTES` | Window size queried by every run, starting from the checkpoint; must match the CronJob schedule | `5` |
+| `LOKI_MAX_WINDOW_ENTRIES` | Max Loki lines held per window; larger windows are split in half and retried | `500000` |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook that failed runs are reported to; alerting is disabled if unset (secret) | — |
 | `ALERT_AFTER_CONSECUTIVE_FAILURES` | Consecutive failed runs before an alert is sent | `1` |
 | `LAG_ALERT_MINUTES` | Alert when the sync is more than this many minutes behind real time and not catching up | `60` |
